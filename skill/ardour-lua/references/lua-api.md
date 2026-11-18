@@ -94,7 +94,10 @@ returns true/false; `ARDOUR.LuaAPI.monotonic_time()` is available for timing.
 * Notes survive exactly: pitch, velocity, start beat and length beat all matched
   the source; a 6-note file with four distinct durations came through unchanged.
 * One MIDI file may contain several SMF tracks; each becomes its own Ardour track
-  under `ImportDistinctFiles` (this is what the `-t1` suffix indexes).
+  under `ImportDistinctFiles` (this is what the `-t1` suffix indexes) — but only
+  tracks with MIDI *model* events. Measured: notes, CC, pitch bend and channel
+  pressure each create a track; program-change-only, sysex-only, conductor
+  (meta) and empty tracks are dropped. `bin/smf.py` predicts the count.
 * Completion is atomic: the route, region and notes become visible together, so a
   new route is a safe completion signal for `ImportAsTrack`.
 * Ardour writes imported sources into `interchange/<session>/midifiles/`

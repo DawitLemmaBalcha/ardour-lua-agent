@@ -47,9 +47,14 @@ the Lua itself failed — the error text is Ardour's own, including line numbers
   MIDI. `mode: "as_track"` (default) makes one track per file; `mode: "to_track"`
   imports into whichever track is **currently selected**. Targeting by name is not
   supported: `Editor:set_selection` needs an unexposed `SelectionList`.
-  The CLI waits for `as_track` imports to land — one route per input file, and the
-  route set must stop growing for 0.35 s (multi-track MIDI can exceed one per
-  file). It returns `new_tracks`. `to_track` creates no route, so it cannot be
+  The CLI waits for `as_track` imports to land, using a track count derived from
+  the files themselves: one Ardour track per SMF track that contains notes, CC,
+  pitch bend or channel pressure (program-change-only, sysex-only, conductor and
+  empty tracks are dropped by Ardour), plus one per audio file. It returns
+  `expected_tracks`, `new_tracks` and `complete`. If the count cannot be derived
+  (unknown extension, unparsable file, `merge: true`) the command reports
+  `uncertain: true`, `complete: false` and exits non-zero rather than pretending
+  the import finished. `to_track` creates no route, so it cannot be
   awaited: confirm with MCP `track_get_regions`. `import_audio` is a deprecated
   alias and still works.
 

@@ -27,6 +27,7 @@ import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from osc import encode_message  # noqa: E402
+from smf import SmfError, model_track_count  # noqa: E402
 
 HOME = os.path.expanduser("~")
 STATE_DIR = os.environ.get("ARDOUR_AGENT_STATE", os.path.join(HOME, ".cache", "ardour-agent"))
@@ -213,6 +214,56 @@ def _track_names() -> set[str]:
     return {r["name"] for r in (result["payload"] or {}).get("routes", [])}
 
 
+AUDIO_EXTENSIONS = {".wav", ".aif", ".aiff", ".flac", ".ogg", ".caf", ".mp3", ".raw"}
+
+
+def _expected_tracks(params: dict) -> tuple[int | None, str]:
+    """How many Ardour routes the import should create, and why.
+
+    MIDI files are counted per SMF track that Ardour will keep (see bin/smf.py).
+    Audio files yield one track each. Anything we cannot classify, or a merge
+    import (whose grouping we have not verified), returns None: the caller must
+    then report an uncertain result rather than a completed import.
+    """
+    if params.get("merge") is True:
+        return None, "merge grouping not verified"
+    paths = params.get("paths")
+    if not isinstance(paths, list) or not paths:
+        paths = [params.get("path")]
+    total = 0
+    for path in paths:
+        if not isinstance(path, str):
+            return None, f"unreadable input {path!r}"
+        try:
+            counted = model_track_count(path)
+        except SmfError as exc:
+            return None, f"unparsable MIDI: {exc}"
+        if counted is not None:
+            total += counted
+            continue
+        if os.path.splitext(path)[1].lower() in AUDIO_EXTENSIONS:
+            total += 1
+            continue
+        return None, f"cannot classify {path}"
+    return total, "derived from inputs"
+
+
+def _finish_import(payload, result, new, expected, origin, args):
+    payload.update(new_tracks=new, expected_tracks=expected, expected_source=origin,
+                   waited=True, complete=len(new) >= expected)
+    if expected == 0:
+        payload.update(complete=False, uncertain=False,
+                       warning="inputs contain no importable MIDI model events "
+                               "(program change, sysex and meta do not create tracks)")
+        return _report({"status": "error", "payload": payload, "log": result["log"]})
+    if len(new) > expected:
+        payload["uncertain"] = True
+        payload["warning"] = (f"{len(new)} tracks appeared but {expected} were expected; "
+                              "the extra tracks were not predicted")
+        return _report({"status": "error", "payload": payload, "log": result["log"]})
+    return _report({"status": "ok", "payload": payload, "log": result["log"]})
+
+
 def cmd_op(args: argparse.Namespace) -> int:
     try:
         params = json.loads(args.args) if args.args else {}
@@ -233,28 +284,32 @@ def cmd_op(args: argparse.Namespace) -> int:
     if result["status"] != "ok" or not isinstance(payload, dict) or not payload.get("ok"):
         return _report(result)
     if payload.get("mode") == "as_track":
-        # One track per input file is the floor; a multi-track MIDI file can
-        # produce more. Wait for at least that many, then require the set to stop
-        # growing for `settle` seconds so a second file cannot be missed.
-        expected = max(1, len(params.get("paths") or [params.get("path")] or [None]))
+        expected, origin = _expected_tracks(params)
+        if expected == 0:
+            # Nothing in these inputs creates an Ardour track; do not wait.
+            return _finish_import(payload, result, [], 0, origin, args)
         settle = 0.35
         deadline = time.monotonic() + args.timeout
         current: list[str] = []
-        stable_since = None
+        stable_since = time.monotonic()
         while time.monotonic() < deadline:
             new = sorted(_track_names() - before)
             if new != current:
                 current, stable_since = new, time.monotonic()
-            elif len(new) >= expected and stable_since is not None \
-                    and time.monotonic() - stable_since >= settle:
-                payload["new_tracks"] = new
-                payload["expected_tracks"] = expected
-                payload["waited"] = True
-                return _report({"status": "ok", "payload": payload, "log": result["log"]})
+                continue
+            settled = stable_since is not None and time.monotonic() - stable_since >= settle
+            if settled and expected is not None and len(new) >= expected:
+                return _finish_import(payload, result, new, expected, origin, args)
+            if settled and expected is None:
+                # No trustworthy expected count. Do not claim success.
+                payload.update(new_tracks=new, expected_tracks=None,
+                               expected_source=origin, complete=False, uncertain=True,
+                               warning="completion could not be verified: expected track "
+                                       "count is unknown for these inputs")
+                return _report({"status": "error", "payload": payload, "log": result["log"]})
             time.sleep(0.1)
-        payload["new_tracks"] = current
-        payload["expected_tracks"] = expected
-        payload["wait_timeout"] = True
+        payload.update(new_tracks=current, expected_tracks=expected, expected_source=origin,
+                       wait_timeout=True, complete=False)
         return _report({"status": "error", "payload": payload, "log": result["log"]})
     payload["wait_note"] = ("to_track imports create no new route, so completion cannot be "
                             "observed from Lua; verify with the native MCP track_get_regions")

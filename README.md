@@ -148,11 +148,45 @@ is absent, but `Editor:do_import()` is exposed, together with `C.StringVector()`
 ```
 
 Import runs on worker threads. For `mode: "as_track"` the CLI **waits** before
-returning (`--no-wait` opts out). The rule is: at least one new route per input
-file, and the new-route set must stop growing for 0.35 s (a multi-track MIDI file
-can yield more than one route per file). Single- and multi-file imports both use
-the same rule; three files returned in 1.8 s with all three tracks, regions and
-notes verifiable immediately.
+returning (`--no-wait` opts out), using a track count **derived from the input
+files** rather than from how many paths were passed — one file can become several
+tracks:
+
+| SMF track contains | Ardour track? |
+|---|---|
+| notes | yes |
+| control change | yes |
+| pitch bend | yes |
+| channel pressure | yes |
+| program change only | no |
+| sysex only | no |
+| tempo/meta only (conductor) | no |
+| empty | no |
+
+That table is measured, not assumed: each case was imported into Ardour 9.8 and
+the resulting routes counted. `bin/smf.py` implements exactly this rule, so
+`expected_tracks` is `Σ tracks-that-count` over MIDI inputs plus one per audio
+file.
+
+The wait requires the new-route set to be **stable for 0.35 s** *after* reaching
+the expected count — the settle window is a safety net for anything the predictor
+missed, never the proof itself. Verified live:
+
+| inputs | expected | result |
+|---|---|---|
+| 3 single-track MIDI | 3 | 3 tracks, 1.1 s |
+| 1 two-track MIDI | 2 | 2 tracks, 1.1 s |
+| two-track MIDI + single-track MIDI | 3 | 3 tracks, 1.2 s |
+| two-track MIDI + audio | 3 | 3 tracks, 1.1 s |
+| 10 s audio + MIDI (either order) | 2 | 2 tracks, ~1.1 s |
+| MIDI with only a conductor track | 0 | no tracks, exit 1 with a warning |
+
+When the count cannot be derived — an unrecognised extension, an unparsable
+file, or `merge: true` (grouping not verified) — the command **does not claim
+success**: it prints `complete: false`, `uncertain: true`, explains why, and
+exits non-zero. Over-delivery is treated the same way (`complete: false` with the
+extra tracks listed), so a wrong prediction can never masquerade as a clean
+import.
 
 A `to_track` import creates no route, so completion cannot be observed from Lua;
 the CLI says so and you verify with the native MCP `track_get_regions`.

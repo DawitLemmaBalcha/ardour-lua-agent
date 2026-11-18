@@ -29,3 +29,5 @@ modify or duplicate the native one.
 - `./bin/ardour_agent.py doctor` — install + process + port + round-trip.
 - `./bin/ardour_agent.py op tracks_list` — smoke test.
 - `./install.sh --check` — what is installed, without changing anything.
+- `python3 -m unittest discover -s tests -v` — offline tests for the SMF
+  import predictor (`bin/smf.py`); no Ardour required.
