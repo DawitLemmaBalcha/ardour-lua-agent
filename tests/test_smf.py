@@ -134,6 +134,15 @@ class ModelTrackCount(unittest.TestCase):
         with self.assertRaises(UnsupportedSmfFormat):
             model_track_count(path)
 
+    def test_unexpected_format_is_rejected(self) -> None:
+        # Ardour's switch has case 0 / case 1 / default, so anything else —
+        # including a value that never existed in the spec — is unsupported.
+        for fmt in (3, 7, 0xFFFF):
+            path = self.write(f"t{fmt}.mid", _smf([notes([60])], fmt=fmt))
+            self.assertEqual(smf_format(path), fmt)
+            with self.assertRaises(UnsupportedSmfFormat, msg=f"format {fmt}"):
+                model_track_count(path)
+
     def test_format_reported(self) -> None:
         self.assertEqual(smf_format(self.write("t0.mid", _smf([notes([60])], fmt=0))), 0)
         self.assertEqual(smf_format(self.write("t1.mid", _smf([notes([60])], fmt=1))), 1)
@@ -173,16 +182,17 @@ class AudioExtensions(unittest.TestCase):
 
 
 class Preflight(unittest.TestCase):
-    def test_type2_blocks_before_import(self) -> None:
+    def test_unsupported_formats_block_before_import(self) -> None:
         import ardour_agent
 
         with tempfile.TemporaryDirectory() as d:
-            t2 = os.path.join(d, "bad.mid")
-            with open(t2, "wb") as fh:
-                fh.write(_smf([notes([60])], fmt=2))
-            problems = ardour_agent._preflight({"paths": [t2]})
-        self.assertEqual(len(problems), 1)
-        self.assertIn("Type 2", problems[0])
+            for fmt in (2, 3):
+                bad = os.path.join(d, f"bad{fmt}.mid")
+                with open(bad, "wb") as fh:
+                    fh.write(_smf([notes([60])], fmt=fmt))
+                problems = ardour_agent._preflight({"paths": [bad]})
+                self.assertEqual(len(problems), 1, f"format {fmt}")
+                self.assertIn(f"SMF format {fmt}", problems[0])
 
     def test_normal_input_passes_preflight(self) -> None:
         import ardour_agent

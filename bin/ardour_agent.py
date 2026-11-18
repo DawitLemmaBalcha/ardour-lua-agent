@@ -238,8 +238,8 @@ def _preflight(params: dict) -> list[str]:
             fmt = smf_format(path)
         except OSError:
             continue
-        if fmt == 2:
-            problems.append(f"{path}: SMF Type 2 is not supported by Ardour "
+        if fmt is not None and fmt not in (0, 1):
+            problems.append(f"{path}: SMF format {fmt} is not supported by Ardour "
                             "(its importer handles Type 0 and Type 1 only)")
     return problems
 

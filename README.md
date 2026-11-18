@@ -165,10 +165,12 @@ tracks:
 
 Two input rules are checked before the count is even attempted:
 
-* **SMF Type 2 is refused up front.** Ardour's importer handles Type 0 and Type 1;
-  for Type 2 it logs `MIDI file has unsupported SMF format type 2` and writes
-  nothing. The CLI reports that and exits 1 without importing, rather than
-  predicting a count for a file Ardour will ignore.
+* **Any SMF format other than Type 0 or Type 1 is refused up front.** Ardour's
+  importer switches on the format with `case 0`, `case 1` and a `default` that
+  logs `MIDI file has unsupported SMF format type N` and writes nothing. That
+  covers Type 2 and any other value (a format 3 header is refused too). The CLI
+  reports it and exits 1 without importing, rather than predicting a count for a
+  file Ardour will ignore.
 * **Audio formats are a verified allow-list** (one file per format imported on the
   installed 9.8 build): `.wav .wave .w64 .rf64 .aif .aiff .aifc .au .flac .ogg
   .oga .opus .mp3 .mp2 .caf`. Verified **not** importable on this build:
@@ -192,7 +194,7 @@ missed, never the proof itself. Verified live:
 | two-track MIDI + audio | 3 | 3 tracks, 1.1 s |
 | 10 s audio + MIDI (either order) | 2 | 2 tracks, ~1.1 s |
 | MIDI with only a conductor track | 0 | no tracks, exit 1 with a warning |
-| SMF Type 2 | — | refused before import, exit 1 |
+| SMF format 2, 3 or anything else | — | refused before import, exit 1 |
 | `.opus` / `.aif` / `.w64` / `.rf64` | 1 | imported and counted |
 | `.m4a` | unknown | `uncertain: true`, exit 1, no false success |
 

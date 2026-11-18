@@ -30,7 +30,11 @@ class SmfError(ValueError):
 
 
 class UnsupportedSmfFormat(SmfError):
-    """SMF Type 2. Ardour's importer rejects it ("unsupported SMF format type")."""
+    """Any SMF format other than 0 or 1.
+
+    Ardour's importer handles Type 0 and Type 1 and logs
+    "MIDI file has unsupported SMF format type N" for everything else.
+    """
 
 
 def is_smf(data: bytes) -> bool:
@@ -107,11 +111,12 @@ def model_track_count(path: str) -> int | None:
         return None
     header_len = int.from_bytes(data[4:8], "big")
     fmt = int.from_bytes(data[8:10], "big")
-    if fmt == 2:
-        # Verified in libs/ardour/import.cc:487 — Type 0 and Type 1 are handled,
-        # anything else logs "MIDI file has unsupported SMF format type N" and
-        # returns without writing sources.
-        raise UnsupportedSmfFormat(f"{path}: SMF Type 2 is not supported by Ardour")
+    if fmt not in (0, 1):
+        # Verified in libs/ardour/import.cc — the switch handles case 0 and
+        # case 1; every other value logs "MIDI file has unsupported SMF format
+        # type N" and returns without writing sources.
+        raise UnsupportedSmfFormat(
+            f"{path}: SMF format {fmt} is not supported by Ardour (only Type 0 and Type 1)")
     ntrk = int.from_bytes(data[10:12], "big")
     i = 8 + header_len
     counted = 0
