@@ -1,0 +1,303 @@
+#!/usr/bin/env python3
+"""ardour_agent — command line client for the Ardour Lua bridge.
+
+Two ways to run Lua inside a live Ardour session:
+
+    ardour_agent.py ping
+    ardour_agent.py run  my_script.lua
+    ardour_agent.py run -                      # from stdin
+    ardour_agent.py op   track_delete '{"name":"Drums"}'
+    ardour_agent.py ops                        # list registered operations
+    ardour_agent.py doctor                     # diagnose the whole setup
+
+The transport is a single OSC message (`/access_action LuaAction/script-<slot>`)
+plus two files in ~/.cache/ardour-agent. Nothing listens on the network beyond
+Ardour's own OSC server, and Ardour is not patched.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import socket
+import sys
+import time
+import uuid
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from osc import encode_message  # noqa: E402
+
+HOME = os.path.expanduser("~")
+STATE_DIR = os.environ.get("ARDOUR_AGENT_STATE", os.path.join(HOME, ".cache", "ardour-agent"))
+DATA_DIR = os.environ.get("ARDOUR_AGENT_DATA", os.path.join(HOME, ".local", "share", "ardour-agent"))
+SCRIPTS_DIR = os.environ.get(
+    "ARDOUR_AGENT_SCRIPTS", os.path.join(HOME, ".config", "ardour9", "scripts")
+)
+HOST = os.environ.get("ARDOUR_AGENT_HOST", "127.0.0.1")
+PORT = int(os.environ.get("ARDOUR_AGENT_OSC_PORT", "3819"))
+
+
+def _installed_slot() -> int:
+    """Slot written by install.sh; env var wins so a user can move the binding."""
+    env = os.environ.get("ARDOUR_AGENT_SLOT")
+    if env:
+        return int(env)
+    try:
+        with open(os.path.join(STATE_DIR, "slot")) as fh:
+            return int(fh.read().strip())
+    except (OSError, ValueError):
+        return 1
+
+
+SLOT = _installed_slot()
+REQUEST = os.path.join(STATE_DIR, "request.lua")
+RESPONSE = os.path.join(STATE_DIR, "response.txt")
+
+
+class BridgeError(RuntimeError):
+    pass
+
+
+def _osc_port_listening(port: int) -> bool:
+    """True when a UDP socket is bound to `port` (hex port in /proc/net/udp*)."""
+    needle = f":{port:04X}"
+    for path in ("/proc/net/udp", "/proc/net/udp6"):
+        try:
+            with open(path) as fh:
+                next(fh, None)
+                for line in fh:
+                    fields = line.split()
+                    if len(fields) > 3 and fields[1].endswith(needle) and fields[3] == "07":
+                        return True
+        except OSError:
+            continue
+    return False
+
+
+def _ardour_running() -> bool:
+    """Match the process name, never the command line (which would match us)."""
+    try:
+        out = os.popen("ps -eo comm= 2>/dev/null").read()
+    except OSError:
+        return False
+    return any(line.startswith(("ArdourGUI", "ardour-9")) for line in out.splitlines())
+
+
+def send_trigger(slot: int = SLOT) -> None:
+    message = encode_message("/access_action", f"LuaAction/script-{slot}")
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.sendto(message, (HOST, PORT))
+
+
+def run_lua(source: str, timeout: float = 15.0, poll: float = 0.02) -> dict:
+    """Queue `source` as a request, trigger the bridge, return the parsed reply."""
+    os.makedirs(STATE_DIR, exist_ok=True)
+    request_id = uuid.uuid4().hex[:16]
+    header = f"-- ardour-agent-id: {request_id}\n"
+    tmp = REQUEST + f".{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(header)
+        fh.write(source)
+        if not source.endswith("\n"):
+            fh.write("\n")
+    os.replace(tmp, REQUEST)
+
+    try:
+        os.unlink(RESPONSE)
+    except FileNotFoundError:
+        pass
+
+    send_trigger()
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with open(RESPONSE, encoding="utf-8") as fh:
+                text = fh.read()
+        except FileNotFoundError:
+            time.sleep(poll)
+            # re-trigger occasionally: a trigger sent while Ardour was busy is
+            # dropped silently, and the file is already consumed by then.
+            if time.monotonic() + 1.0 > deadline:
+                send_trigger()
+            continue
+        if not text:
+            time.sleep(poll)
+            continue
+        parsed = _parse_response(text)
+        if parsed["id"] != request_id:
+            time.sleep(poll)
+            continue
+        return parsed
+
+    raise BridgeError(
+        "no response from the Ardour bridge.\n"
+        f"  request: {REQUEST}\n"
+        f"  osc:     {HOST}:{PORT} -> LuaAction/script-{SLOT}\n"
+        "Run `ardour_agent.py doctor` for a diagnosis."
+    )
+
+
+def _parse_response(text: str) -> dict:
+    lines = text.splitlines()
+    header: dict[str, str] = {}
+    body_start = len(lines)
+    for i, line in enumerate(lines):
+        if line.strip() == "---":
+            body_start = i + 1
+            break
+        if ":" in line:
+            key, _, value = line.partition(":")
+            header[key.strip()] = value.strip()
+    body_lines = lines[body_start:]
+    log_lines: list[str] = []
+    for i, line in enumerate(body_lines):
+        if line.strip() == "log:":
+            log_lines = body_lines[i + 1:]
+            body_lines = body_lines[:i]
+            break
+    raw = "\n".join(body_lines).strip()
+    payload: object = None
+    if raw:
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            payload = raw
+    return {
+        "id": header.get("id", ""),
+        "status": header.get("status", "unknown"),
+        "payload": payload,
+        "log": log_lines,
+    }
+
+
+def op_source(name: str, args: dict | None = None) -> str:
+    return f"return agent_op({json.dumps(name)}, {lua_literal(args or {})})\n"
+
+
+def lua_literal(value) -> str:
+    """Render a Python value as Lua source (tables for dict/list)."""
+    if value is None:
+        return "nil"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    if isinstance(value, str):
+        return json.dumps(value)
+    if isinstance(value, dict):
+        parts = [f"[{lua_literal(k)}] = {lua_literal(v)}" for k, v in value.items()]
+        return "{" + ", ".join(parts) + "}"
+    if isinstance(value, (list, tuple)):
+        return "{" + ", ".join(lua_literal(v) for v in value) + "}"
+    raise TypeError(f"cannot convert {type(value).__name__} to Lua")
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    if args.file == "-":
+        source = sys.stdin.read()
+    else:
+        with open(args.file, encoding="utf-8") as fh:
+            source = fh.read()
+    return _report(run_lua(source, timeout=args.timeout))
+
+
+def cmd_op(args: argparse.Namespace) -> int:
+    try:
+        params = json.loads(args.args) if args.args else {}
+    except json.JSONDecodeError as exc:
+        print(f"invalid JSON arguments: {exc}", file=sys.stderr)
+        return 2
+    return _report(run_lua(op_source(args.name, params), timeout=args.timeout))
+
+
+def cmd_ops(_: argparse.Namespace) -> int:
+    result = run_lua('return agent_op("list_ops", {})\n')
+    if result["status"] != "ok":
+        return _report(result)
+    ops = (result["payload"] or {}).get("ops", [])
+    print("\n".join(ops))
+    return 0
+
+
+def _report(result: dict) -> int:
+    if result["status"] == "ok":
+        print(json.dumps(result["payload"], indent=2, ensure_ascii=False))
+        for line in result["log"]:
+            print(line, file=sys.stderr)
+        return 0
+    payload = result["payload"]
+    message = payload if isinstance(payload, str) else json.dumps(payload, indent=2)
+    print(f"ERROR: {message}", file=sys.stderr)
+    return 1
+
+
+def cmd_doctor(_: argparse.Namespace) -> int:
+    ok = True
+    checks: list[tuple[bool, str]] = []
+
+    bridge_file = os.path.join(SCRIPTS_DIR, "ardour_agent_bridge.lua")
+    checks.append((os.path.isfile(bridge_file), f"bridge script installed: {bridge_file}"))
+    checks.append((os.path.isfile(os.path.join(DATA_DIR, "ardour_ops.lua")),
+                   f"ops module installed: {os.path.join(DATA_DIR, 'ardour_ops.lua')}"))
+    checks.append((_ardour_running(), "Ardour process running"))
+    checks.append((_osc_port_listening(PORT), f"OSC server listening on UDP {PORT}"))
+
+    if all(passed for passed, _ in checks):
+        try:
+            result = run_lua('return agent_op("ping", {})\n', timeout=8)
+            passed = result["status"] == "ok"
+            checks.append((passed, "bridge round-trip (ping)"))
+            if passed:
+                payload = result["payload"] or {}
+                print(f"session: {payload.get('session')}  "
+                      f"sr: {payload.get('sample_rate')}  "
+                      f"version: {payload.get('ardour_version')}")
+        except BridgeError as exc:
+            checks.append((False, f"bridge round-trip: {exc.splitlines()[0]}"))
+
+    for passed, label in checks:
+        print(f"[{'ok' if passed else 'FAIL'}] {label}")
+        ok = ok and passed
+
+    if not ok:
+        print("\nTroubleshooting: docs/troubleshooting.md (or README 'Troubleshooting').")
+    return 0 if ok else 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="ardour_agent", description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--timeout", type=float, default=15.0, help="seconds to wait for a reply")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("ping", help="check the bridge answers and print session identity")
+    p.set_defaults(func=lambda a: _report(run_lua('return agent_op("ping", {})\n', timeout=a.timeout)))
+
+    p = sub.add_parser("run", help="run a Lua file (or - for stdin) inside Ardour")
+    p.add_argument("file")
+    p.set_defaults(func=cmd_run)
+
+    p = sub.add_parser("op", help="run a registered operation")
+    p.add_argument("name")
+    p.add_argument("args", nargs="?", help="JSON object of arguments")
+    p.set_defaults(func=cmd_op)
+
+    p = sub.add_parser("ops", help="list registered operations")
+    p.set_defaults(func=cmd_ops)
+
+    p = sub.add_parser("doctor", help="diagnose installation, OSC and bridge")
+    p.set_defaults(func=cmd_doctor)
+
+    args = parser.parse_args(argv)
+    if hasattr(args, "timeout") is False:
+        args.timeout = 15.0
+    try:
+        return args.func(args)
+    except BridgeError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
