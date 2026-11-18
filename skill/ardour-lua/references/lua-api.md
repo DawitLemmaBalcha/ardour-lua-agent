@@ -53,8 +53,38 @@ Absent: `automation`, `interface`, `set_value_db`.
 
 ## Editor
 
-`undo()`, `redo()`, `get_selection()`. Everything else probed (`import_audio`,
-`split_regions`, `add_region`, `select_all`, `save_state`, `playlists`) is nil.
+| Member | Verified |
+|---|---|
+| `do_import(files, file_mode, track_mode, src_quality, midi_ns, midi_tm, pos, PluginInfo(), Track(), false)` | ✔ imports audio from the timer hook |
+| `undo()`, `redo()` | ✔ |
+| `get_selection()` | ✔ returns an opaque SelectionList (not iterable) |
+| `set_selection(list, n)` | ✘ needs a `SelectionList`; tables and Route objects are rejected |
+| `select_all_tracks()` | ✔ (present) |
+
+Absent: `import_audio`, `import_files`, `insert_external_audio`, `add_region`,
+`new_region`, `split_regions`, `select_all`, `playlists`, `save_state`.
+
+### Import recipe (from Ardour's own `s_import_files.lua`)
+
+```lua
+local files = C.StringVector ()
+files:push_back ("/path/to.wav")
+Editor:do_import (files,
+  Editing.ImportDistinctFiles,      -- or Editing.ImportMergeFiles
+  Editing.ImportAsTrack,            -- or Editing.ImportToTrack (uses SELECTION)
+  ARDOUR.SrcQuality.SrcBest,
+  ARDOUR.MidiTrackNameSource.SMFFileAndTrackName,
+  ARDOUR.MidiTempoMapDisposition.SMFTempoIgnore,
+  Temporal.timepos_t (48000),       -- placement, samples
+  ARDOUR.PluginInfo (), ARDOUR.Track (), false)
+```
+
+`ImportToTrack` honours the current selection; there is no way to select from Lua,
+so callers must select first (GUI or native MCP `track_select`). Import is
+asynchronous — regions appear after the worker finishes.
+
+Pre-flight checks: `ARDOUR.LuaAPI.file_test(path, ARDOUR.LuaAPI.FileTest.Exists)`
+returns true/false; `ARDOUR.LuaAPI.monotonic_time()` is available for timing.
 
 ## Temporal
 

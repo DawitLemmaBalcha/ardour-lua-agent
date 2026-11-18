@@ -17,6 +17,7 @@ Ardour's own OSC server, and Ardour is not patched.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import socket
@@ -233,36 +234,66 @@ def _report(result: dict) -> int:
 
 
 def cmd_doctor(_: argparse.Namespace) -> int:
+    """Two concerns, deliberately separate:
+
+    * the timer hook is the PRIMARY execution path — its round-trip is a
+      pass/fail check;
+    * OSC is optional (direct OSC control, and the fast path where upstream's
+      action bug does not apply) — reported as information, never as failure.
+    """
     ok = True
     checks: list[tuple[bool, str]] = []
 
     bridge_file = os.path.join(SCRIPTS_DIR, "ardour_agent_bridge.lua")
     checks.append((os.path.isfile(bridge_file), f"bridge script installed: {bridge_file}"))
+    checks.append((os.path.isfile(os.path.join(DATA_DIR, "agent_core.lua")),
+                   f"core installed: {os.path.join(DATA_DIR, 'agent_core.lua')}"))
     checks.append((os.path.isfile(os.path.join(DATA_DIR, "ardour_ops.lua")),
-                   f"ops module installed: {os.path.join(DATA_DIR, 'ardour_ops.lua')}"))
+                   f"ops installed: {os.path.join(DATA_DIR, 'ardour_ops.lua')}"))
     checks.append((_ardour_running(), "Ardour process running"))
-    checks.append((_osc_port_listening(PORT), f"OSC server listening on UDP {PORT}"))
+    checks.append((_hook_bound(), "timer hook bound in ui_scripts (Ardour Agent Timer)"))
+
+    info: list[tuple[bool, str]] = []
+    info.append((_osc_port_listening(PORT),
+                 f"OSC control surface on UDP {PORT} (optional: direct OSC control + fast path)"))
 
     if all(passed for passed, _ in checks):
         try:
             result = run_lua('return agent_op("ping", {})\n', timeout=8)
             passed = result["status"] == "ok"
-            checks.append((passed, "bridge round-trip (ping)"))
+            checks.append((passed, "timer-hook round-trip (primary execution path)"))
             if passed:
                 payload = result["payload"] or {}
-                print(f"session: {payload.get('session')}  "
-                      f"sr: {payload.get('sample_rate')}  "
-                      f"version: {payload.get('ardour_version')}")
+                print(f"session: {payload.get('session')}  sr: {payload.get('sample_rate')}")
+            else:
+                print(f"hook replied with error: {result['payload']}")
         except BridgeError as exc:
-            checks.append((False, f"bridge round-trip: {exc.splitlines()[0]}"))
+            checks.append((False, f"timer-hook round-trip: {exc.splitlines()[0]}"))
 
     for passed, label in checks:
         print(f"[{'ok' if passed else 'FAIL'}] {label}")
         ok = ok and passed
+    for passed, label in info:
+        print(f"[{'ok' if passed else 'info'}] {label}")
 
     if not ok:
         print("\nTroubleshooting: docs/troubleshooting.md (or README 'Troubleshooting').")
     return 0 if ok else 1
+
+
+def _hook_bound() -> bool:
+    """True when ui_scripts carries our LuaCallback binding."""
+    import xml.etree.ElementTree as ET
+
+    path = os.path.join(os.path.dirname(SCRIPTS_DIR.rstrip("/")), "ui_scripts")
+    try:
+        root = ET.parse(path).getroot()
+        hooks = root.find("ActionHooks")
+        if hooks is None:
+            return False
+        return any(cb.get("name") == "Ardour Agent Timer" for cb in hooks.findall("LuaCallback"))
+    except Exception:  # noqa: BLE001 - unreadable or malformed means "not bound"
+        return False
 
 
 def main(argv: list[str] | None = None) -> int:

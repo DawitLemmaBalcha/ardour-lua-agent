@@ -25,6 +25,7 @@ expose.
 | Operation | Native MCP | This layer |
 |---|---|---|
 | Delete a track or bus | — | `track_delete` |
+| Import audio files (new track or existing) | — | `import_audio` |
 | Gain/mute/solo automation | — | `automation_add`, `automation_clear` |
 | Route inventory with gain/mute/solo | partial | `tracks_list` |
 | Arbitrary Lua (experiments, discovery) | — | `ardour_agent.py run file.lua` |
@@ -70,6 +71,8 @@ never touches the Ardour binary, its MCP module or any system file:
 ./bin/ardour_agent.py op tracks_list
 ./bin/ardour_agent.py op track_delete '{"name":"Drums","dry_run":true}'
 ./bin/ardour_agent.py op track_delete '{"name":"Drums"}'
+./bin/ardour_agent.py op import_audio '{"path":"/music/take.wav","position":96000}'
+./bin/ardour_agent.py op import_audio '{"paths":["a.wav","b.wav"],"mode":"to_track"}'
 ./bin/ardour_agent.py op automation_add \
     '{"name":"Vox","param":"gain","points":[{"when":0,"value":1.0},{"when":96000,"value":0.4}]}'
 ./bin/ardour_agent.py run my_script.lua      # arbitrary Lua, `return <value>`
@@ -133,16 +136,34 @@ Probed live with `ardour_agent.py run`, not copied from old docs.
 `Temporal` (`timepos_t`, `TempoMap`, `Tempo`, `Meter`), `ARDOUR.LuaAPI`,
 `LuaDialog`, `PBD`.
 
-**Not exposed (confirmed absent, so this layer cannot do it):** playlist access
-from a track (`Track:playlist()` is nil; `Session:playlists():by_name()` returns a
-null pointer), audio import (`Session:import_files` is nil), region lists,
-`Session:tempo_map`, and reading automation back (`AutomationList:events()`
-returns an opaque userdata). Use the native MCP for the region operations it
-covers, and the GUI for audio import.
+**Audio import is possible, just not where you would look.** `Session:import_files`
+is absent, but `Editor:do_import()` is exposed, together with `C.StringVector()`,
+`Editing.*` import enums and `Temporal.timepos_t()`. `import_audio` uses it:
+
+```json
+{"path": "/music/take.wav", "position": 96000}                       // new track at 2 s
+{"paths": ["a.wav", "b.wav"]}                                        // one track each
+{"path": "take.wav", "mode": "to_track"}                             // into the SELECTED track
+```
+
+Import runs on worker threads, so it returns before regions exist; poll
+`tracks_list` / the native MCP region tools. Importing *into* a named track is
+not possible: `Editor:set_selection()` requires an internal `SelectionList` that
+Lua does not expose, so the caller must select the target first (GUI, or MCP
+`track_select`) and then use `mode: "to_track"`.
+
+**Not exposed (confirmed absent):** playlist access from a track
+(`Track:playlist()` is nil; `Session:playlists():by_name()` returns a null
+pointer), region lists, `Session:tempo_map`, setting the track selection, and
+reading automation back (`AutomationList:events()` is opaque). Use the native MCP
+for the region operations it covers.
 
 ## Troubleshooting
 
-`./bin/ardour_agent.py doctor` checks install, process, port and round-trip.
+`./bin/ardour_agent.py doctor` has two separate concerns: the **timer hook** is the
+primary execution path and its round-trip is pass/fail; **OSC** is reported as
+information (it is optional — needed only for direct OSC control and the fast
+path).
 
 | Symptom | Cause / fix |
 |---|---|

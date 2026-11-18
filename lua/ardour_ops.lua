@@ -149,6 +149,58 @@ M.ops["track_delete"] = function (args)
 	return { ok = true, deleted = name, remaining = #M.routes () }
 end
 
+--- Import audio files. Audio import IS reachable from Lua, but not through
+--- Session: it is Editor:do_import() (see Ardour's own s_import_files.lua).
+--- Import runs on worker threads, so it returns before regions exist; poll
+--- tracks_list / the native MCP region tools to confirm.
+M.ops["import_audio"] = function (args)
+	local paths = args.paths
+	if type (paths) ~= "table" or #paths == 0 then
+		if type (args.path) == "string" then paths = { args.path } else
+			M.fail ("pass path=<file> or paths=[<file>, ...]")
+		end
+	end
+	for _, p in ipairs (paths) do
+		if type (p) ~= "string" then M.fail ("paths must be strings") end
+		if not ARDOUR.LuaAPI.file_test (p, ARDOUR.LuaAPI.FileTest.Exists) then
+			M.fail ("file does not exist: " .. p)
+		end
+	end
+	local position = tonumber (args.position) or 0
+	local mode = tostring (args.mode or "as_track"):lower ()
+	local merge = args.merge == true
+	local to_track = (mode == "to_track" or mode == "to_selected_track")
+	if args.dry_run then
+		return {
+			dry_run = true, files = paths, mode = to_track and "to_selected_track" or "as_track",
+			position = position, merge = merge, would_select = args.track,
+		}
+	end
+	if to_track and args.track then
+		M.fail ("Lua cannot set the track selection: Editor:set_selection needs an internal "
+			.. "SelectionList that is not exposed. Select '" .. args.track
+			.. "' in Ardour or with the native MCP track_select, then call again with "
+			.. "mode=to_track and no 'track' argument.")
+	end
+	local files = C.StringVector ()
+	for _, p in ipairs (paths) do files:push_back (p) end
+	local file_mode = merge and Editing.ImportMergeFiles or Editing.ImportDistinctFiles
+	local track_mode = to_track and Editing.ImportToTrack or Editing.ImportAsTrack
+	local ok, err = pcall (function ()
+		Editor:do_import (files, file_mode, track_mode, ARDOUR.SrcQuality.SrcBest,
+			ARDOUR.MidiTrackNameSource.SMFFileAndTrackName,
+			ARDOUR.MidiTempoMapDisposition.SMFTempoIgnore,
+			Temporal.timepos_t (position), ARDOUR.PluginInfo (), ARDOUR.Track (), false)
+	end)
+	if not ok then M.fail ("import failed: " .. tostring (err)) end
+	return {
+		ok = true, imported = #paths, files = paths,
+		mode = to_track and "to_selected_track" or "as_track",
+		position = position, merge = merge,
+		note = "import runs in the background; poll tracks_list or track_get_regions",
+	}
+end
+
 --- Control names accepted by the automation ops.
 local CONTROLS = {
 	gain = "gain_control",
