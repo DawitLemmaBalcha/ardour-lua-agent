@@ -47,10 +47,16 @@ the Lua itself failed — the error text is Ardour's own, including line numbers
   MIDI. `mode: "as_track"` (default) makes one track per file; `mode: "to_track"`
   imports into whichever track is **currently selected**. Targeting by name is not
   supported: `Editor:set_selection` needs an unexposed `SelectionList`.
-  The CLI waits for `as_track` imports to land (new route visible ⇒ region and
-  notes are already there, verified) and returns `new_tracks`. `to_track` creates
-  no route, so it cannot be awaited: confirm with MCP `track_get_regions`.
-  `import_audio` is a deprecated alias and still works.
+  The CLI waits for `as_track` imports to land — one route per input file, and the
+  route set must stop growing for 0.35 s (multi-track MIDI can exceed one per
+  file). It returns `new_tracks`. `to_track` creates no route, so it cannot be
+  awaited: confirm with MCP `track_get_regions`. `import_audio` is a deprecated
+  alias and still works.
+
+  To inspect what was imported, Ardour writes the sources into
+  `interchange/<session>/midifiles/` (resolution is rescaled to 19200 ticks per
+  quarter); parsing those is the only way to see events such as pitch bends,
+  because neither Lua nor the MCP exposes them.
 * `tracks_list` → every route with `gain`, `muted`, `soloed`, `is_master`, `hidden`.
 * `session_info` → name, path, sample rate, route/track counts.
 * `track_delete {name, dry_run}` → removes a track or bus. **Refuses the master
@@ -110,6 +116,12 @@ LUA
 probe candidate names.
 
 ## Safety
+
+* **Never call `front()` on a `RegionList`/`RegionSelection` without checking it
+  is non-empty.** Ardour asserts `!empty()` in C++ and the whole application
+  aborts. This is how an Ardour session was killed during development.
+* `Editor:get_selection().regions` is empty after `do_import`: the last argument
+  of `do_import` is `with_markers`, not "select".
 
 * Destructive ops: `dry_run` first, name the exact route, get confirmation.
 * Never delete `Master`; the op refuses, but do not test that on a user's session.

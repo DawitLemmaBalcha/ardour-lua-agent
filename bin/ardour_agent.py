@@ -233,14 +233,27 @@ def cmd_op(args: argparse.Namespace) -> int:
     if result["status"] != "ok" or not isinstance(payload, dict) or not payload.get("ok"):
         return _report(result)
     if payload.get("mode") == "as_track":
+        # One track per input file is the floor; a multi-track MIDI file can
+        # produce more. Wait for at least that many, then require the set to stop
+        # growing for `settle` seconds so a second file cannot be missed.
+        expected = max(1, len(params.get("paths") or [params.get("path")] or [None]))
+        settle = 0.35
         deadline = time.monotonic() + args.timeout
+        current: list[str] = []
+        stable_since = None
         while time.monotonic() < deadline:
             new = sorted(_track_names() - before)
-            if new:
+            if new != current:
+                current, stable_since = new, time.monotonic()
+            elif len(new) >= expected and stable_since is not None \
+                    and time.monotonic() - stable_since >= settle:
                 payload["new_tracks"] = new
+                payload["expected_tracks"] = expected
                 payload["waited"] = True
                 return _report({"status": "ok", "payload": payload, "log": result["log"]})
             time.sleep(0.1)
+        payload["new_tracks"] = current
+        payload["expected_tracks"] = expected
         payload["wait_timeout"] = True
         return _report({"status": "error", "payload": payload, "log": result["log"]})
     payload["wait_note"] = ("to_track imports create no new route, so completion cannot be "
@@ -304,7 +317,7 @@ def cmd_doctor(_: argparse.Namespace) -> int:
             else:
                 print(f"hook replied with error: {result['payload']}")
         except BridgeError as exc:
-            checks.append((False, f"timer-hook round-trip: {exc.splitlines()[0]}"))
+            checks.append((False, f"timer-hook round-trip: {str(exc).splitlines()[0]}"))
 
     for passed, label in checks:
         print(f"[{'ok' if passed else 'FAIL'}] {label}")

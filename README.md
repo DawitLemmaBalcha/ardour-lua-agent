@@ -147,12 +147,15 @@ is absent, but `Editor:do_import()` is exposed, together with `C.StringVector()`
 {"path": "take.wav", "mode": "to_track"}                             // into the SELECTED track
 ```
 
-Import runs on worker threads. For `mode: "as_track"` the CLI **waits** until the
-new route appears before returning (`--no-wait` opts out), and that is safe: the
-track, its region and its notes become visible in the same instant — measured on
-a MIDI import, the route appeared 0.19 s after the call with all 6 notes already
-readable. A `to_track` import creates no route, so completion cannot be observed
-from Lua; the CLI says so and you verify with the native MCP `track_get_regions`.
+Import runs on worker threads. For `mode: "as_track"` the CLI **waits** before
+returning (`--no-wait` opts out). The rule is: at least one new route per input
+file, and the new-route set must stop growing for 0.35 s (a multi-track MIDI file
+can yield more than one route per file). Single- and multi-file imports both use
+the same rule; three files returned in 1.8 s with all three tracks, regions and
+notes verifiable immediately.
+
+A `to_track` import creates no route, so completion cannot be observed from Lua;
+the CLI says so and you verify with the native MCP `track_get_regions`.
 
 MIDI import preserves the musical content exactly. A 6-note Basic-Pitch-style file
 (six notes, four distinct durations, velocities 64–104, plus a pitch bend) round
@@ -162,6 +165,20 @@ MIDI import preserves the musical content exactly. A 6-note Basic-Pitch-style fi
 67 v88 @0.0 len 0.5    69 v76 @0.5 len 0.25   71 v96 @0.75 len 0.75
 72 v64 @1.5 len 0.125  74 v104 @1.625 len 0.5 76 v72 @2.125 len 1.0
 ```
+
+**Pitch bends are preserved.** Ardour writes the imported sources back into the
+session (`interchange/<session>/midifiles/`); comparing those against the
+originals shows every event surviving, with the bend's tick and value intact and
+only the resolution rescaled (480 → 19200 ticks per quarter, exactly ×40):
+
+| fixture | bend in source | in imported source | all events match |
+|---|---|---|---|
+| `bp_bend_after.mid` | tick 1920, value 10240 | tick 76800, value 10240 | ✔ |
+| `bp_bend_mid.mid` | tick 240, value 16383 | tick 9600, value 16383 | ✔ |
+| `bp_no_bend.mid` | none | none | ✔ |
+| Basic Pitch file | tick 1500, value 10240 | tick 60000, value 10240 | ✔ |
+
+10240 is 0x2800 (centre is 8192, so +25 % up); 16383 is 0x3FFF, full up.
 
 Importing *into a named* track is still not possible: `Editor:set_selection()`
 requires an internal `SelectionList` that Lua does not expose, so select the

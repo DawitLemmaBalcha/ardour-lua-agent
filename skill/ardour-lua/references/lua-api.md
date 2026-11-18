@@ -97,6 +97,21 @@ returns true/false; `ARDOUR.LuaAPI.monotonic_time()` is available for timing.
   under `ImportDistinctFiles` (this is what the `-t1` suffix indexes).
 * Completion is atomic: the route, region and notes become visible together, so a
   new route is a safe completion signal for `ImportAsTrack`.
+* Ardour writes imported sources into `interchange/<session>/midifiles/`
+  (and `audiofiles/` for audio). Those files are the imported data; parsing them
+  is the only way to verify events the API does not expose, such as pitch bends.
+* SMF resolution is rescaled on import: 480 ticks/quarter becomes 19200
+  (×40), and every event tick scales with it; values are untouched.
+* `do_import`'s last parameter is `with_markers`, **not** "add to selection".
+  Imported regions are therefore not selected.
+
+### Do not crash Ardour
+
+`RegionSelection:regionlist()` returns a `RegionList` bound as a C++ list.
+Calling `front()` on it while empty hits `assert(!this->empty())` and aborts the
+process — no Lua error, no recovery. Guard with `n_midi_regions() > 0` first.
+`Editor:get_regions_at()` needs an existing `RegionSelection` and `TrackViewList`,
+so regions are only reachable after a GUI selection exists.
 
 ## Temporal
 

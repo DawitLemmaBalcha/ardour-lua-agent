@@ -74,6 +74,19 @@ al:clear (Temporal.timepos_t (0), Temporal.timepos_t (1000000000000))
 Usually `Session:playlists():by_name(...)`. Playlist lookup is not usable in 9.8;
 region work belongs to the native MCP (`region_*` tools) or the GUI.
 
+## Ardour exits abruptly after a Lua call
+
+Some C++ bindings assert instead of raising. The known one:
+
+```lua
+Editor:get_selection().regions:regionlist():front()   -- aborts if the selection is empty
+```
+
+`do_import`'s final argument is `with_markers`, so imports leave the selection
+empty. Always test `n_midi_regions() > 0` before touching a region list. Ardour
+cannot catch this from Lua; the process simply dies and the journal shows
+`Assertion '!this->empty()' failed`.
+
 ## Concurrent calls
 
 There is one request slot. Two agents writing at once will race: the last writer
