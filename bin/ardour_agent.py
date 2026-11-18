@@ -203,13 +203,49 @@ def cmd_run(args: argparse.Namespace) -> int:
     return _report(run_lua(source, timeout=args.timeout))
 
 
+IMPORT_OPS = {"import_media", "import_audio"}
+
+
+def _track_names() -> set[str]:
+    result = run_lua(op_source("tracks_list"), timeout=15)
+    if result["status"] != "ok":
+        raise BridgeError(f"could not list tracks: {result['payload']}")
+    return {r["name"] for r in (result["payload"] or {}).get("routes", [])}
+
+
 def cmd_op(args: argparse.Namespace) -> int:
     try:
         params = json.loads(args.args) if args.args else {}
     except json.JSONDecodeError as exc:
         print(f"invalid JSON arguments: {exc}", file=sys.stderr)
         return 2
-    return _report(run_lua(op_source(args.name, params), timeout=args.timeout))
+
+    if args.name not in IMPORT_OPS or args.no_wait or params.get("dry_run") is True:
+        return _report(run_lua(op_source(args.name, params), timeout=args.timeout))
+
+    # Imports run on worker threads. A new-track import is complete when the
+    # new route appears — verified: track, region and notes become visible in
+    # the same instant. Importing into the selected track creates no route, so
+    # it cannot be observed from Lua and is reported as such.
+    before = _track_names()
+    result = run_lua(op_source(args.name, params), timeout=args.timeout)
+    payload = result["payload"]
+    if result["status"] != "ok" or not isinstance(payload, dict) or not payload.get("ok"):
+        return _report(result)
+    if payload.get("mode") == "as_track":
+        deadline = time.monotonic() + args.timeout
+        while time.monotonic() < deadline:
+            new = sorted(_track_names() - before)
+            if new:
+                payload["new_tracks"] = new
+                payload["waited"] = True
+                return _report({"status": "ok", "payload": payload, "log": result["log"]})
+            time.sleep(0.1)
+        payload["wait_timeout"] = True
+        return _report({"status": "error", "payload": payload, "log": result["log"]})
+    payload["wait_note"] = ("to_track imports create no new route, so completion cannot be "
+                            "observed from Lua; verify with the native MCP track_get_regions")
+    return _report(result)
 
 
 def cmd_ops(_: argparse.Namespace) -> int:
@@ -312,6 +348,8 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("op", help="run a registered operation")
     p.add_argument("name")
     p.add_argument("args", nargs="?", help="JSON object of arguments")
+    p.add_argument("--no-wait", action="store_true",
+                   help="return immediately for imports instead of waiting for the new track")
     p.set_defaults(func=cmd_op)
 
     p = sub.add_parser("ops", help="list registered operations")

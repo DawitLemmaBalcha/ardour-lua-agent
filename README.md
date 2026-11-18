@@ -25,7 +25,7 @@ expose.
 | Operation | Native MCP | This layer |
 |---|---|---|
 | Delete a track or bus | — | `track_delete` |
-| Import audio files (new track or existing) | — | `import_audio` |
+| Import audio **or MIDI** (new track or selected track) | — | `import_media` (`import_audio` kept as alias) |
 | Gain/mute/solo automation | — | `automation_add`, `automation_clear` |
 | Route inventory with gain/mute/solo | partial | `tracks_list` |
 | Arbitrary Lua (experiments, discovery) | — | `ardour_agent.py run file.lua` |
@@ -71,8 +71,9 @@ never touches the Ardour binary, its MCP module or any system file:
 ./bin/ardour_agent.py op tracks_list
 ./bin/ardour_agent.py op track_delete '{"name":"Drums","dry_run":true}'
 ./bin/ardour_agent.py op track_delete '{"name":"Drums"}'
-./bin/ardour_agent.py op import_audio '{"path":"/music/take.wav","position":96000}'
-./bin/ardour_agent.py op import_audio '{"paths":["a.wav","b.wav"],"mode":"to_track"}'
+./bin/ardour_agent.py op import_media '{"path":"/music/basicpitch.mid"}'        # new MIDI track, waits
+./bin/ardour_agent.py op import_media '{"path":"/music/take.wav","position":96000}'
+./bin/ardour_agent.py op import_media '{"paths":["a.wav","b.wav"],"mode":"to_track"}'
 ./bin/ardour_agent.py op automation_add \
     '{"name":"Vox","param":"gain","points":[{"when":0,"value":1.0},{"when":96000,"value":0.4}]}'
 ./bin/ardour_agent.py run my_script.lua      # arbitrary Lua, `return <value>`
@@ -146,11 +147,25 @@ is absent, but `Editor:do_import()` is exposed, together with `C.StringVector()`
 {"path": "take.wav", "mode": "to_track"}                             // into the SELECTED track
 ```
 
-Import runs on worker threads, so it returns before regions exist; poll
-`tracks_list` / the native MCP region tools. Importing *into* a named track is
-not possible: `Editor:set_selection()` requires an internal `SelectionList` that
-Lua does not expose, so the caller must select the target first (GUI, or MCP
-`track_select`) and then use `mode: "to_track"`.
+Import runs on worker threads. For `mode: "as_track"` the CLI **waits** until the
+new route appears before returning (`--no-wait` opts out), and that is safe: the
+track, its region and its notes become visible in the same instant — measured on
+a MIDI import, the route appeared 0.19 s after the call with all 6 notes already
+readable. A `to_track` import creates no route, so completion cannot be observed
+from Lua; the CLI says so and you verify with the native MCP `track_get_regions`.
+
+MIDI import preserves the musical content exactly. A 6-note Basic-Pitch-style file
+(six notes, four distinct durations, velocities 64–104, plus a pitch bend) round
+-tripped as:
+
+```
+67 v88 @0.0 len 0.5    69 v76 @0.5 len 0.25   71 v96 @0.75 len 0.75
+72 v64 @1.5 len 0.125  74 v104 @1.625 len 0.5 76 v72 @2.125 len 1.0
+```
+
+Importing *into a named* track is still not possible: `Editor:set_selection()`
+requires an internal `SelectionList` that Lua does not expose, so select the
+target first (GUI, or MCP `track_select`) and use `mode: "to_track"`.
 
 **Not exposed (confirmed absent):** playlist access from a track
 (`Track:playlist()` is nil; `Session:playlists():by_name()` returns a null

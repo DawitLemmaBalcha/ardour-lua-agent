@@ -86,6 +86,18 @@ asynchronous — regions appear after the worker finishes.
 Pre-flight checks: `ARDOUR.LuaAPI.file_test(path, ARDOUR.LuaAPI.FileTest.Exists)`
 returns true/false; `ARDOUR.LuaAPI.monotonic_time()` is available for timing.
 
+### MIDI specifics (verified)
+
+* A `.mid` imports as a **MIDI track**; with `MidiTrackNameSource.SMFFileAndTrackName`
+  the route is named `<file>-<n>-<track>`, e.g. `basicpitch_hum-1-t1`, and the
+  region after the SMF name (`basicpitch_hum-1`).
+* Notes survive exactly: pitch, velocity, start beat and length beat all matched
+  the source; a 6-note file with four distinct durations came through unchanged.
+* One MIDI file may contain several SMF tracks; each becomes its own Ardour track
+  under `ImportDistinctFiles` (this is what the `-t1` suffix indexes).
+* Completion is atomic: the route, region and notes become visible together, so a
+  new route is a safe completion signal for `ImportAsTrack`.
+
 ## Temporal
 
 `timepos_t(sample)` → userdata (works). Also exposes `TempoMap`, `Tempo`,

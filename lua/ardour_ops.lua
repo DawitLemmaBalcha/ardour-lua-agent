@@ -149,11 +149,11 @@ M.ops["track_delete"] = function (args)
 	return { ok = true, deleted = name, remaining = #M.routes () }
 end
 
---- Import audio files. Audio import IS reachable from Lua, but not through
+--- Import audio or MIDI files. Import IS reachable from Lua, but not through
 --- Session: it is Editor:do_import() (see Ardour's own s_import_files.lua).
 --- Import runs on worker threads, so it returns before regions exist; poll
 --- tracks_list / the native MCP region tools to confirm.
-M.ops["import_audio"] = function (args)
+M.ops["import_media"] = function (args)
 	local paths = args.paths
 	if type (paths) ~= "table" or #paths == 0 then
 		if type (args.path) == "string" then paths = { args.path } else
@@ -199,6 +199,13 @@ M.ops["import_audio"] = function (args)
 		position = position, merge = merge,
 		note = "import runs in the background; poll tracks_list or track_get_regions",
 	}
+end
+
+--- Deprecated alias kept so existing callers keep working.
+M.ops["import_audio"] = function (args)
+	local rv = M.ops["import_media"] (args)
+	if type (rv) == "table" then rv.deprecated = "use import_media" end
+	return rv
 end
 
 --- Control names accepted by the automation ops.

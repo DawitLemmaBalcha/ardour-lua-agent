@@ -21,7 +21,7 @@ restart Ardour.
 |---|---|
 | transport, markers, fader/mute/solo, plugin add/remove/bypass, region move/split/gain, MIDI notes, session save | **native MCP** (`mcp__ardour__*`) |
 | delete a track/bus, automation curves, arbitrary Lua, API discovery | **this skill** |
-| import audio files | **this skill** (`import_audio`, via `Editor:do_import`) |
+| import audio or MIDI files | **this skill** (`import_media`, via `Editor:do_import`) |
 | playlist surgery, regions by track | the native MCP's `region_*` tools; Lua exposes no playlist accessor |
 
 Never modify Ardour's MCP server or duplicate a tool it already provides.
@@ -43,11 +43,14 @@ the Lua itself failed — the error text is Ardour's own, including line numbers
 
 ### Registered operations
 
-* `import_audio {path | paths, position, mode, merge, dry_run}` → imports audio.
-  `mode: "as_track"` (default) makes one track per file; `mode: "to_track"`
+* `import_media {path | paths, position, mode, merge, dry_run}` → imports audio or
+  MIDI. `mode: "as_track"` (default) makes one track per file; `mode: "to_track"`
   imports into whichever track is **currently selected**. Targeting by name is not
-  supported: `Editor:set_selection` needs an unexposed `SelectionList`. Import is
-  asynchronous — poll `tracks_list` or the MCP region tools before claiming success.
+  supported: `Editor:set_selection` needs an unexposed `SelectionList`.
+  The CLI waits for `as_track` imports to land (new route visible ⇒ region and
+  notes are already there, verified) and returns `new_tracks`. `to_track` creates
+  no route, so it cannot be awaited: confirm with MCP `track_get_regions`.
+  `import_audio` is a deprecated alias and still works.
 * `tracks_list` → every route with `gain`, `muted`, `soloed`, `is_master`, `hidden`.
 * `session_info` → name, path, sample rate, route/track counts.
 * `track_delete {name, dry_run}` → removes a track or bus. **Refuses the master
