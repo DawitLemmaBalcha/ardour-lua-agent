@@ -20,13 +20,17 @@ and meta (0xFF) do not create an Ardour track on their own.
 """
 from __future__ import annotations
 
-__all__ = ["model_track_count", "is_smf"]
+__all__ = ["model_track_count", "smf_format", "is_smf", "SmfError", "UnsupportedSmfFormat"]
 
 _COUNTED = set(range(0x80, 0xC0)) | set(range(0xD0, 0xF0))
 
 
 class SmfError(ValueError):
     pass
+
+
+class UnsupportedSmfFormat(SmfError):
+    """SMF Type 2. Ardour's importer rejects it ("unsupported SMF format type")."""
 
 
 def is_smf(data: bytes) -> bool:
@@ -80,6 +84,18 @@ def _track_has_model_events(body: bytes) -> bool:
     return False
 
 
+def smf_format(path: str) -> int | None:
+    """SMF format (0, 1 or 2), or None when the file is not a MIDI file."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(14)
+    except OSError:
+        return None
+    if not is_smf(head):
+        return None
+    return int.from_bytes(head[8:10], "big")
+
+
 def model_track_count(path: str) -> int | None:
     """Number of SMF tracks Ardour will turn into tracks, or None if not SMF."""
     try:
@@ -90,6 +106,12 @@ def model_track_count(path: str) -> int | None:
     if not is_smf(data):
         return None
     header_len = int.from_bytes(data[4:8], "big")
+    fmt = int.from_bytes(data[8:10], "big")
+    if fmt == 2:
+        # Verified in libs/ardour/import.cc:487 — Type 0 and Type 1 are handled,
+        # anything else logs "MIDI file has unsupported SMF format type N" and
+        # returns without writing sources.
+        raise UnsupportedSmfFormat(f"{path}: SMF Type 2 is not supported by Ardour")
     ntrk = int.from_bytes(data[10:12], "big")
     i = 8 + header_len
     counted = 0

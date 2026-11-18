@@ -103,6 +103,8 @@ returns true/false; `ARDOUR.LuaAPI.monotonic_time()` is available for timing.
 * Ardour writes imported sources into `interchange/<session>/midifiles/`
   (and `audiofiles/` for audio). Those files are the imported data; parsing them
   is the only way to verify events the API does not expose, such as pitch bends.
+* Only SMF Type 0 and Type 1 import. Type 2 hits `"MIDI file has unsupported SMF
+  format type 2"` in `libs/ardour/import.cc` and produces no tracks.
 * SMF resolution is rescaled on import: 480 ticks/quarter becomes 19200
   (×40), and every event tick scales with it; values are untouched.
 * `do_import`'s last parameter is `with_markers`, **not** "add to selection".

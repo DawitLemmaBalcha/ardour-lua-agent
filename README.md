@@ -163,6 +163,18 @@ tracks:
 | tempo/meta only (conductor) | no |
 | empty | no |
 
+Two input rules are checked before the count is even attempted:
+
+* **SMF Type 2 is refused up front.** Ardour's importer handles Type 0 and Type 1;
+  for Type 2 it logs `MIDI file has unsupported SMF format type 2` and writes
+  nothing. The CLI reports that and exits 1 without importing, rather than
+  predicting a count for a file Ardour will ignore.
+* **Audio formats are a verified allow-list** (one file per format imported on the
+  installed 9.8 build): `.wav .wave .w64 .rf64 .aif .aiff .aifc .au .flac .ogg
+  .oga .opus .mp3 .mp2 .caf`. Verified **not** importable on this build:
+  `.m4a`, `.aac`, `.raw` — those fall through to the uncertain path instead of
+  being guessed as one track.
+
 That table is measured, not assumed: each case was imported into Ardour 9.8 and
 the resulting routes counted. `bin/smf.py` implements exactly this rule, so
 `expected_tracks` is `Σ tracks-that-count` over MIDI inputs plus one per audio
@@ -180,6 +192,9 @@ missed, never the proof itself. Verified live:
 | two-track MIDI + audio | 3 | 3 tracks, 1.1 s |
 | 10 s audio + MIDI (either order) | 2 | 2 tracks, ~1.1 s |
 | MIDI with only a conductor track | 0 | no tracks, exit 1 with a warning |
+| SMF Type 2 | — | refused before import, exit 1 |
+| `.opus` / `.aif` / `.w64` / `.rf64` | 1 | imported and counted |
+| `.m4a` | unknown | `uncertain: true`, exit 1, no false success |
 
 When the count cannot be derived — an unrecognised extension, an unparsable
 file, or `merge: true` (grouping not verified) — the command **does not claim

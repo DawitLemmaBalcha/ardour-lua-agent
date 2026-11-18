@@ -27,7 +27,7 @@ import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from osc import encode_message  # noqa: E402
-from smf import SmfError, model_track_count  # noqa: E402
+from smf import SmfError, UnsupportedSmfFormat, model_track_count, smf_format  # noqa: E402
 
 HOME = os.path.expanduser("~")
 STATE_DIR = os.environ.get("ARDOUR_AGENT_STATE", os.path.join(HOME, ".cache", "ardour-agent"))
@@ -214,7 +214,34 @@ def _track_names() -> set[str]:
     return {r["name"] for r in (result["payload"] or {}).get("routes", [])}
 
 
-AUDIO_EXTENSIONS = {".wav", ".aif", ".aiff", ".flac", ".ogg", ".caf", ".mp3", ".raw"}
+# Verified against ardour9 9.8.0 by importing one file per format and checking a
+# track appeared: these are accepted, while .m4a, .aac and .raw produced nothing.
+AUDIO_EXTENSIONS = {
+    ".wav", ".wave", ".w64", ".rf64",          # RIFF family
+    ".aif", ".aiff", ".aifc", ".au",            # AIFF / AU
+    ".flac", ".ogg", ".oga", ".opus",           # lossless / Ogg family
+    ".mp3", ".mp2",                             # MPEG audio
+    ".caf",                                     # Core Audio
+}
+
+
+def _preflight(params: dict) -> list[str]:
+    """Inputs Ardour cannot import at all. Checked before anything is imported."""
+    paths = params.get("paths")
+    if not isinstance(paths, list) or not paths:
+        paths = [params.get("path")]
+    problems: list[str] = []
+    for path in paths:
+        if not isinstance(path, str):
+            continue
+        try:
+            fmt = smf_format(path)
+        except OSError:
+            continue
+        if fmt == 2:
+            problems.append(f"{path}: SMF Type 2 is not supported by Ardour "
+                            "(its importer handles Type 0 and Type 1 only)")
+    return problems
 
 
 def _expected_tracks(params: dict) -> tuple[int | None, str]:
@@ -274,6 +301,11 @@ def cmd_op(args: argparse.Namespace) -> int:
     if args.name not in IMPORT_OPS or args.no_wait or params.get("dry_run") is True:
         return _report(run_lua(op_source(args.name, params), timeout=args.timeout))
 
+    problems = _preflight(params)
+    if problems:
+        return _report({"status": "error", "payload": {"ok": False, "unsupported": problems},
+                        "log": []})
+
     # Imports run on worker threads. A new-track import is complete when the
     # new route appears — verified: track, region and notes become visible in
     # the same instant. Importing into the selected track creates no route, so
@@ -302,10 +334,14 @@ def cmd_op(args: argparse.Namespace) -> int:
                 return _finish_import(payload, result, new, expected, origin, args)
             if settled and expected is None:
                 # No trustworthy expected count. Do not claim success.
+                hint = ""
+                if not new:
+                    hint = (" no tracks appeared at all; this format may be unsupported "
+                            "by the installed Ardour build")
                 payload.update(new_tracks=new, expected_tracks=None,
                                expected_source=origin, complete=False, uncertain=True,
                                warning="completion could not be verified: expected track "
-                                       "count is unknown for these inputs")
+                                       "count is unknown for these inputs." + hint)
                 return _report({"status": "error", "payload": payload, "log": result["log"]})
             time.sleep(0.1)
         payload.update(new_tracks=current, expected_tracks=expected, expected_source=origin,

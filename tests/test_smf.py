@@ -18,7 +18,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bin"))
 
-from smf import model_track_count  # noqa: E402
+from smf import UnsupportedSmfFormat, model_track_count, smf_format  # noqa: E402
 
 
 def _vlq(n: int) -> bytes:
@@ -128,12 +128,70 @@ class ModelTrackCount(unittest.TestCase):
     def test_format0_single_track(self) -> None:
         self.assertEqual(self.count("j.mid", _smf([notes([60, 62, 64])], fmt=0)), 1)
 
+    def test_type2_is_rejected(self) -> None:
+        path = self.write("t2.mid", _smf([notes([60]), notes([62])], fmt=2))
+        self.assertEqual(smf_format(path), 2)
+        with self.assertRaises(UnsupportedSmfFormat):
+            model_track_count(path)
+
+    def test_format_reported(self) -> None:
+        self.assertEqual(smf_format(self.write("t0.mid", _smf([notes([60])], fmt=0))), 0)
+        self.assertEqual(smf_format(self.write("t1.mid", _smf([notes([60])], fmt=1))), 1)
+
     def test_audio_file_is_not_smf(self) -> None:
         path = self.write("k.wav", b"RIFF....WAVEfmt ")
         self.assertIsNone(model_track_count(path))
 
     def test_missing_file(self) -> None:
         self.assertIsNone(model_track_count(os.path.join(self.dir.name, "nope.mid")))
+
+
+class AudioExtensions(unittest.TestCase):
+    def test_verified_formats_present(self) -> None:
+        import ardour_agent
+
+        for ext in (".wav", ".wave", ".w64", ".rf64", ".aif", ".aiff", ".aifc",
+                    ".au", ".flac", ".ogg", ".oga", ".opus", ".mp3", ".mp2", ".caf"):
+            self.assertIn(ext, ardour_agent.AUDIO_EXTENSIONS, ext)
+
+    def test_rejected_formats_absent(self) -> None:
+        import ardour_agent
+
+        # Verified to produce no track on ardour9 9.8.0.
+        for ext in (".m4a", ".aac", ".raw"):
+            self.assertNotIn(ext, ardour_agent.AUDIO_EXTENSIONS, ext)
+
+    def test_raw_is_not_guessed(self) -> None:
+        import ardour_agent
+
+        with tempfile.TemporaryDirectory() as d:
+            raw = os.path.join(d, "take.raw")
+            with open(raw, "wb") as fh:
+                fh.write(b"\x00\x01" * 100)
+            expected, _ = ardour_agent._expected_tracks({"paths": [raw]})
+        self.assertIsNone(expected)
+
+
+class Preflight(unittest.TestCase):
+    def test_type2_blocks_before_import(self) -> None:
+        import ardour_agent
+
+        with tempfile.TemporaryDirectory() as d:
+            t2 = os.path.join(d, "bad.mid")
+            with open(t2, "wb") as fh:
+                fh.write(_smf([notes([60])], fmt=2))
+            problems = ardour_agent._preflight({"paths": [t2]})
+        self.assertEqual(len(problems), 1)
+        self.assertIn("Type 2", problems[0])
+
+    def test_normal_input_passes_preflight(self) -> None:
+        import ardour_agent
+
+        with tempfile.TemporaryDirectory() as d:
+            ok = os.path.join(d, "ok.mid")
+            with open(ok, "wb") as fh:
+                fh.write(_smf([notes([60])], fmt=1))
+            self.assertEqual(ardour_agent._preflight({"paths": [ok]}), [])
 
 
 class ExpectedTracks(unittest.TestCase):
